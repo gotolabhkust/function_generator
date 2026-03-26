@@ -6,6 +6,9 @@
 #include <Keypad.h>
 #include <Preferences.h>
 
+#include <WiFi.h>
+#include <WebServer.h>
+
 // ==================== 引脚 ====================
 #define OLED_SDA 19
 #define OLED_SCL 20
@@ -33,6 +36,11 @@ char keys[ROWS][COLS] = {
 byte rowPins[ROWS] = {10,11,12,13};
 byte colPins[COLS] = {4,5,6,7};
 Keypad keypad = Keypad(makeKeymap(keys), rowPins, colPins, ROWS, COLS);
+
+// ==================== WIFI 设置 ====================
+const char* WIFI_SSID = "ESP32-Timer";
+const char* WIFI_PASS = "12345678";
+WebServer server(80);
 
 // ==================== 参数 ====================
 unsigned long highTime;
@@ -78,6 +86,12 @@ void timer();
 void modify(char k);
 char scanKey();
 
+void startWiFi();
+void handleRoot();
+void handleSet();
+void handleStart();
+void handleStop();
+
 // ==============================================
 char scanKey() {
   for (byte r = 0; r < ROWS; r++) {
@@ -120,11 +134,13 @@ void setup() {
     pinMode(colPins[c], INPUT_PULLUP);
   }
 
+  startWiFi();
   updateScreen();
 }
 
 // ==============================================
 void loop() {
+  server.handleClient();
   curKey = scanKey();
 
   // ── 运行中：只响应"0"停止 ──
@@ -284,4 +300,57 @@ void saveData() {
   prefs.putULong("l", lowTime);
   prefs.putInt("r",   repeatCount);
   prefs.end();
+}
+
+// ==============================================
+// WIFI 网页控制
+// ==============================================
+void startWiFi() {
+  WiFi.softAP(WIFI_SSID, WIFI_PASS);
+  server.on("/", handleRoot);
+  server.on("/set", handleSet);
+  server.on("/start", handleStart);
+  server.on("/stop", handleStop);
+  server.begin();
+}
+
+void handleRoot() {
+  String html = "<html><head><meta charset='utf-8'><title>ESP32 Timer</title></head>";
+  html += "<body style='font-size:22px;text-align:center;margin-top:30px'>";
+  html += "<h3>ESP32 倒计时控制器</h3>";
+  html += "<form action='/set'>";
+  html += "High: <input type='number' name='h' value='"+String(highTime)+"' max='9999'><br><br>";
+  html += "Low: <input type='number' name='l' value='"+String(lowTime)+"' max='9999'><br><br>";
+  html += "Repeat: <input type='number' name='r' value='"+String(repeatCount)+"' min='1' max='9999'><br><br>";
+  html += "<input type='submit' value='保存设置' style='width:160px;height:40px'><br><br>";
+  html += "</form>";
+  html += "<button onclick='window.location.href=\"/start\"' style='width:160px;height:40px'>启动</button><br><br>";
+  html += "<button onclick='window.location.href=\"/stop\"' style='width:160px;height:40px'>停止</button>";
+  html += "</body></html>";
+  server.send(200, "text/html", html);
+}
+
+void handleSet() {
+  if (server.hasArg("h")) highTime = server.arg("h").toInt();
+  if (server.hasArg("l")) lowTime = server.arg("l").toInt();
+  if (server.hasArg("r")) repeatCount = server.arg("r").toInt();
+  highTime = constrain(highTime, 0,9999);
+  lowTime = constrain(lowTime,0,9999);
+  repeatCount = constrain(repeatCount,1,9999);
+  saveData();
+  updateScreen();
+  server.sendHeader("Location", "/");
+  server.send(303);
+}
+
+void handleStart() {
+  start();
+  server.sendHeader("Location", "/");
+  server.send(303);
+}
+
+void handleStop() {
+  stop();
+  server.sendHeader("Location", "/");
+  server.send(303);
 }
