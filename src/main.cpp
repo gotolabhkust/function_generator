@@ -14,6 +14,7 @@
 #define OLED_SCL 20
 #define RGB_PIN  48
 #define OUT_PIN  2       // ← 新增：高低电平输出
+#define OUT_PIN_MS 3    // 毫秒模式用 GPIO3，几乎不冲突、安全脚
 
 // ==================== OLED ====================
 #define SCREEN_WIDTH 128
@@ -38,7 +39,7 @@ byte colPins[COLS] = {4,5,6,7};
 Keypad keypad = Keypad(makeKeymap(keys), rowPins, colPins, ROWS, COLS);
 
 // ==================== WIFI 设置 ====================
-const char* WIFI_SSID = "ESP32-Timer";
+const char* WIFI_SSID = "ESP32-GotoLab";
 const char* WIFI_PASS = "12345678";
 WebServer server(80);
 
@@ -74,6 +75,11 @@ unsigned long lastRepeat = 0;
 // ==================== 断电记忆 ====================
 Preferences prefs;
 
+// ==================== 模式选择 ====================
+bool isMsMode = false;  // false=秒模式, true=毫秒模式
+unsigned long highTime_s, lowTime_s, highTime_ms, lowTime_ms;
+int repeatCount_s, repeatCount_ms;
+
 // ==================== 函数声明 ====================
 void loadData();
 void saveData();
@@ -91,6 +97,11 @@ void handleRoot();
 void handleSet();
 void handleStart();
 void handleStop();
+void handleModeA();
+void handleModeB();
+
+void switchToSecondMode();
+void switchToMsMode();
 
 // ==============================================
 char scanKey() {
@@ -125,6 +136,8 @@ void setup() {
   // 输出引脚初始化，默认低电平
   pinMode(OUT_PIN, OUTPUT);
   digitalWrite(OUT_PIN, LOW);
+  pinMode(OUT_PIN_MS, OUTPUT);
+  digitalWrite(OUT_PIN_MS, LOW);
 
   for (byte r = 0; r < ROWS; r++) {
     pinMode(rowPins[r], OUTPUT);
@@ -200,25 +213,33 @@ void modify(char k) {
     case '5': lowTime     = constrain(lowTime     + 1, MIN_VAL, MAX_VAL); break;
     case '7': repeatCount = constrain(repeatCount - 1, 1,       9999);    break;
     case '8': repeatCount = constrain(repeatCount + 1, 1,       9999);    break;
+    case 'A': switchToMsMode();  break;
+    case 'B': switchToSecondMode(); break;
   }
 }
 
 // ==============================================
 void setOutput(bool high) {
-  digitalWrite(OUT_PIN, high ? HIGH : LOW);
+  if (isMsMode) {
+    digitalWrite(OUT_PIN_MS, high ? HIGH : LOW);
+  } else {
+    digitalWrite(OUT_PIN, high ? HIGH : LOW);
+  }
 }
 
 // ==============================================
 void updateScreen() {
   display.clearDisplay();
 
+  const char* unit = isMsMode ? "ms" : " s";
+
   display.setCursor(0,  0);
-  display.print("High: "); display.print(highTime); display.print(" s | ");
-  display.print(currentState == HIGH_DELAY ? currentSecond : 0); display.print(" s");
+  display.print("High: "); display.print(highTime); display.print(unit); display.print(" | ");
+  display.print(currentState == HIGH_DELAY ? currentSecond : 0); display.print(unit);
 
   display.setCursor(0, 16);
-  display.print("Low: ");  display.print(lowTime);  display.print(" s | ");
-  display.print(currentState == LOW_DELAY ? currentSecond : 0); display.print(" s");
+  display.print("Low: ");  display.print(lowTime);  display.print(unit); display.print(" | ");
+  display.print(currentState == LOW_DELAY ? currentSecond : 0); display.print(unit);
 
   display.setCursor(0, 32);
   display.print("Rep: "); display.print(repeatCount); display.print(" | ");
@@ -263,7 +284,7 @@ void stop() {
 }
 
 void timer() {
-  if (millis() - lastTick >= 1000) {
+  if (millis() - lastTick >= (isMsMode ? 1 : 1000)) {  // <-- 只改这行
     lastTick = millis();
     currentSecond--;
 
@@ -272,14 +293,14 @@ void timer() {
         currentState  = LOW_DELAY;
         currentSecond = lowTime;
         setRGB(0, 0, 255);
-        setOutput(false);  // ← 切换到 LOW 阶段，输出低
+        setOutput(false);
       } else {
         currentRep++;
         if (currentRep > totalRep) { stop(); return; }
         currentState  = HIGH_DELAY;
         currentSecond = highTime;
         setRGB(255, 0, 0);
-        setOutput(true);   // ← 切换到 HIGH 阶段，输出高
+        setOutput(true);
       }
     }
     updateScreen();
@@ -288,18 +309,72 @@ void timer() {
 
 void loadData() {
   prefs.begin("timer", true);
-  highTime    = prefs.getULong("h", 50);
-  lowTime     = prefs.getULong("l", 100);
-  repeatCount = prefs.getInt("r",   1);
+  isMsMode = prefs.getBool("mode", false);
+  
+  highTime_s = prefs.getULong("h_s", 50);
+  lowTime_s  = prefs.getULong("l_s", 100);
+  repeatCount_s = prefs.getInt("r_s", 1);
+  
+  highTime_ms = prefs.getULong("h_m", 500);
+  lowTime_ms  = prefs.getULong("l_m", 1000);
+  repeatCount_ms = prefs.getInt("r_m", 1);
+  
+  if (isMsMode) {
+    highTime = highTime_ms;
+    lowTime = lowTime_ms;
+    repeatCount = repeatCount_ms;
+  } else {
+    highTime = highTime_s;
+    lowTime = lowTime_s;
+    repeatCount = repeatCount_s;
+  }
   prefs.end();
 }
 
 void saveData() {
   prefs.begin("timer", false);
-  prefs.putULong("h", highTime);
-  prefs.putULong("l", lowTime);
-  prefs.putInt("r",   repeatCount);
+  prefs.putBool("mode", isMsMode);
+  
+  if (isMsMode) {
+    highTime_ms = highTime;
+    lowTime_ms = lowTime;
+    repeatCount_ms = repeatCount;
+  } else {
+    highTime_s = highTime;
+    lowTime_s = lowTime;
+    repeatCount_s = repeatCount;
+  }
+  
+  prefs.putULong("h_s", highTime_s);
+  prefs.putULong("l_s", lowTime_s);
+  prefs.putInt("r_s", repeatCount_s);
+  
+  prefs.putULong("h_m", highTime_ms);
+  prefs.putInt("l_m", lowTime_ms);
+  prefs.putInt("r_m", repeatCount_ms);
   prefs.end();
+}
+
+void switchToSecondMode() {
+  if (isMsMode == false) return;
+  saveData();
+  isMsMode = false;
+  highTime = highTime_s;
+  lowTime = lowTime_s;
+  repeatCount = repeatCount_s;
+  saveData();
+  updateScreen();
+}
+
+void switchToMsMode() {
+  if (isMsMode == true) return;
+  saveData();
+  isMsMode = true;
+  highTime = highTime_ms;
+  lowTime = lowTime_ms;
+  repeatCount = repeatCount_ms;
+  saveData();
+  updateScreen();
 }
 
 // ==============================================
@@ -311,21 +386,27 @@ void startWiFi() {
   server.on("/set", handleSet);
   server.on("/start", handleStart);
   server.on("/stop", handleStop);
+  server.on("/modeA", handleModeA);
+  server.on("/modeB", handleModeB);
   server.begin();
 }
 
 void handleRoot() {
+  const char* unit = isMsMode ? "ms" : "s";
   String html = "<html><head><meta charset='utf-8'><title>ESP32 Timer</title></head>";
   html += "<body style='font-size:22px;text-align:center;margin-top:30px'>";
-  html += "<h3>ESP32 倒计时控制器</h3>";
+  html += "<h3>ESP32 波形发生器 (" + String(unit) + ")</h3>";
   html += "<form action='/set'>";
-  html += "High: <input type='number' name='h' value='"+String(highTime)+"' max='9999'><br><br>";
-  html += "Low: <input type='number' name='l' value='"+String(lowTime)+"' max='9999'><br><br>";
+  html += "High: <input type='number' name='h' value='"+String(highTime)+"' max='9999'> "+String(unit)+"<br><br>";
+  html += "Low: <input type='number' name='l' value='"+String(lowTime)+"' max='9999'> "+String(unit)+"<br><br>";
   html += "Repeat: <input type='number' name='r' value='"+String(repeatCount)+"' min='1' max='9999'><br><br>";
   html += "<input type='submit' value='保存设置' style='width:160px;height:40px'><br><br>";
   html += "</form>";
   html += "<button onclick='window.location.href=\"/start\"' style='width:160px;height:40px'>启动</button><br><br>";
   html += "<button onclick='window.location.href=\"/stop\"' style='width:160px;height:40px'>停止</button>";
+  html += "<br><br>";
+  html += "<button onclick='window.location.href=\"/modeA\"' style='width:160px;height:40px'>A(ms)</button>";
+  html += "<button onclick='window.location.href=\"/modeB\"' style='width:160px;height:40px'>B(s)</button>";
   html += "</body></html>";
   server.send(200, "text/html", html);
 }
@@ -337,6 +418,18 @@ void handleSet() {
   highTime = constrain(highTime, 0,9999);
   lowTime = constrain(lowTime,0,9999);
   repeatCount = constrain(repeatCount,1,9999);
+
+  // 保存到当前模式（秒/毫秒 自动对应）
+  if (isMsMode) {
+    highTime_ms = highTime;
+    lowTime_ms = lowTime;
+    repeatCount_ms = repeatCount;
+  } else {
+    highTime_s = highTime;
+    lowTime_s = lowTime;
+    repeatCount_s = repeatCount;
+  }
+
   saveData();
   updateScreen();
   server.sendHeader("Location", "/");
@@ -351,6 +444,18 @@ void handleStart() {
 
 void handleStop() {
   stop();
+  server.sendHeader("Location", "/");
+  server.send(303);
+}
+
+void handleModeA() {
+  switchToMsMode();
+  server.sendHeader("Location", "/");
+  server.send(303);
+}
+
+void handleModeB() {
+  switchToSecondMode();
   server.sendHeader("Location", "/");
   server.send(303);
 }
